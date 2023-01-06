@@ -50,15 +50,20 @@ class bag3_digital__flop_strongarm(Module):
             dum_buf_params='Optional dummy buffer parameters',
             has_rstlb='True to add rstlb functionality.',
             export_mid='True to export intermediate nodes',
+            has_dtsa="True to use DTSA. Defaults to False",
         )
 
     @classmethod
     def get_default_param_values(cls) -> Dict[str, Any]:
-        return dict(has_rstlb=False, export_mid=False, midbuf_params=None, dum_buf_params=None)
+        return dict(has_rstlb=False, export_mid=False, midbuf_params=None, dum_buf_params=None, has_dtsa=False)
 
     def design(self, sa_params: Param, sr_params: Param, midbuf_params: Optional[Param],
-               dum_buf_params: Optional[Param], has_rstlb: bool, export_mid: bool) -> None:
+               dum_buf_params: Optional[Param], has_rstlb: bool, export_mid: bool, has_dtsa: bool) -> None:
+        
         if midbuf_params is None:
+            if has_dtsa:
+                # Polarity flip required for reset behavior
+                raise ValueError("DTSA requires midbuf")
             self.remove_instance('XMBUF<1:0>')
             self.reconnect_instance('XSR', {'sb': 'midn', 'rb': 'midp'}.items())
             needs_inbuf = True
@@ -73,7 +78,13 @@ class bag3_digital__flop_strongarm(Module):
             if needs_inbuf and num_stg % 2 == 1:
                 raise ValueError("Mid buffer must have an even number of stages if SR latch input buffer is required")
             if dual_out:
-                self.reconnect_instance('XSR', {'s': 'midn_bufb', 'r': 'midp_bufb'}.items())
+                if has_dtsa:
+                    # Reorder to support correct reset behavior
+                    _map = {'s': 'midp_buf', 'sb': 'midp_bufb', 'r': 'midn_buf', 'rb': 'midn_bufb'}
+                    self.reconnect_instance('XSR', _map.items())
+                else:
+                    self.reconnect_instance(
+                        'XSR', {'s': 'midn_bufb', 'r': 'midp_bufb'}.items())
                 nets_to_export.extend(['midp_bufb', 'midn_bufb'])
 
         if dum_buf_params is None:
@@ -85,6 +96,14 @@ class bag3_digital__flop_strongarm(Module):
         if needs_inbuf and inbuf_test is None:
             raise ValueError('SR latch must have input buffers.')
         
+        if has_dtsa:
+            self_timed = sa_params['dyn_latch']['has_rst']  # TODO: this is a bit of a hack
+            sa_cls = 'comp_double_tail_selftime_core' if self_timed else 'comp_double_tail_core'
+            self.replace_instance_master('XSA', 'bag_vco_adc', sa_cls, keep_connections=True)
+            if not self_timed:
+                self.reconnect_instance_terminal('XSA', 'clkb', 'clkb')
+                self.add_pin('clkb', 'input')
+
         self.instances['XSA'].design(has_rstb=has_rstlb, **sa_params.copy(append=dict(export_mid=export_mid)))
         self.instances['XSR'].design(has_rstb=has_rstlb, **sr_params)
 
@@ -99,6 +118,8 @@ class bag3_digital__flop_strongarm(Module):
                 self.add_pin(net, TermType.inout)
 
             sa_debug_conns = {pin: f'fe_{pin}' for pin in ['midp', 'midn', 'tail']}
+            if has_dtsa:
+                sa_debug_conns = {pin: f'fe_{pin}' for pin in ['xp', 'xn']}
             self.reconnect_instance('XSA', sa_debug_conns.items())
             for pin in sa_debug_conns.values():
                 self.add_pin(pin, TermType.inout)
