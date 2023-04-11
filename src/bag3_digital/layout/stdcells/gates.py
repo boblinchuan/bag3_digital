@@ -165,10 +165,14 @@ class InvCore(MOSBase):
         tr_manager = self.tr_manager
         tr_w_h = tr_manager.get_width(hm_layer, 'sig')
         tr_w_v = tr_manager.get_width(vm_layer, 'sig')
-        nout_tidx = sig_locs.get('nout', self.get_track_index(ridx_n, MOSWireType.DS_GATE,
-                                                              wire_name='sig', wire_idx=0))
-        pout_tidx = sig_locs.get('pout', self.get_track_index(ridx_p, MOSWireType.DS_GATE,
-                                                              wire_name='sig', wire_idx=-1))
+        nout_tidx = sig_locs.get('nout', None)
+        if not nout_tidx:
+            nout_tidx = self.get_track_index(ridx_n, MOSWireType.DS_GATE,
+                                             wire_name='sig', wire_idx=0)
+        pout_tidx = sig_locs.get('pout', None)
+        if not pout_tidx:
+            pout_tidx = self.get_track_index(ridx_p, MOSWireType.DS_GATE,
+                                           wire_name='sig', wire_idx=0)
         nout_tid = TrackID(hm_layer, nout_tidx, tr_w_h)
         pout_tid = TrackID(hm_layer, pout_tidx, tr_w_h)
 
@@ -926,9 +930,10 @@ class NAND2Core(MOSBase):
             self.add_pin('in<0>', in0_vm)
             self.add_pin('in<1>', in1_vm)
 
-        nd_tidx = sig_locs.get('nout',
-                               self.get_track_index(ridx_n, MOSWireType.DS_GATE,
-                                                    wire_name='sig', wire_idx=-1))
+        nd_tidx = sig_locs.get('nout', None)
+        if not nd_tidx:
+            nd_tidx = self.get_track_index(ridx_n, MOSWireType.DS_GATE,
+                                            wire_name='sig', wire_idx=-1)
         nd_tid = TrackID(hm_layer, nd_tidx, width=tr_w_h)
         mlm_out = mlm.get('out', MinLenMode.MIDDLE)
         if self.can_short_adj_tracks and not is_guarded:
@@ -938,9 +943,10 @@ class NAND2Core(MOSBase):
             self.add_pin('out', pports.d)
         else:
             # need to use vm_layer to short adjacent tracks.
-            pd_tidx = sig_locs.get('pout',
-                                   self.get_track_index(ridx_p, MOSWireType.DS_GATE,
-                                                        wire_name='sig'))
+            pd_tidx = sig_locs.get('pout', None)
+            if not pd_tidx:
+                pd_tidx = self.get_track_index(ridx_p, MOSWireType.DS_GATE,
+                                                wire_name='sig', wire_idx=0)
             pd_tid = TrackID(hm_layer, pd_tidx, width=tr_w_h)
             pout = self.connect_to_tracks(pports.d, pd_tid, min_len_mode=mlm_out)
             nout = self.connect_to_tracks(nports.d, nd_tid, min_len_mode=mlm_out)
@@ -1593,9 +1599,10 @@ class NOR2Core(MOSBase):
             self.add_pin('in<0>', in0_vm)
             self.add_pin('in<1>', in1_vm)
 
-        pd_tidx = sig_locs.get('pout',
-                               self.get_track_index(ridx_p, MOSWireType.DS_GATE,
-                                                    wire_name='sig', wire_idx=0))
+        pd_tidx = sig_locs.get('pout', None)
+        if not pd_tidx:
+            pd_tidx = self.get_track_index(ridx_p, MOSWireType.DS_GATE,
+                                           wire_name='sig', wire_idx=0)
         pd_tid = TrackID(hm_layer, pd_tidx, width=tr_w_h)
         mlm_out = mlm.get('out', MinLenMode.MIDDLE)
         if self.can_short_adj_tracks and not is_guarded:
@@ -1605,9 +1612,10 @@ class NOR2Core(MOSBase):
             self.add_pin('out', nports.d)
         else:
             # need to use vm_layer to short adjacent tracks.
-            nd_tidx = sig_locs.get('nout',
-                                   self.get_track_index(ridx_n, MOSWireType.DS_GATE,
-                                                        wire_name='sig', wire_idx=-1))
+            nd_tidx = sig_locs.get('nout', None)
+            if not nd_tidx:
+                nd_tidx = self.get_track_index(ridx_n, MOSWireType.DS_GATE,
+                                               wire_name='sig', wire_idx=-1)
             nd_tid = TrackID(hm_layer, nd_tidx, width=tr_w_h)
             nout = self.connect_to_tracks(nports.d, nd_tid, min_len_mode=mlm_out)
             pout = self.connect_to_tracks(pports.d, pd_tid, min_len_mode=mlm_out)
