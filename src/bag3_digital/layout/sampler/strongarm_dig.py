@@ -32,7 +32,8 @@ from ...schematic.strongarm_frontend import bag3_digital__strongarm_frontend
 
 
 class SAFrontendDigitalHalf(MOSBase):
-    """A inverter with only transistors drawn, no metal connections
+    """StrongARM half cell, for symmetric layout.
+    Explicitly has bridge transistors (has_bridge=True) to reset mid nodes
     """
 
     def __init__(self, temp_db: TemplateDB, params: Param, **kwargs: Any) -> None:
