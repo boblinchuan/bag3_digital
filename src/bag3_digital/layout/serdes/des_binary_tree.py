@@ -88,6 +88,7 @@ class Demux1To2(MOSBase):
             sig_locs='Signal track location dictionary.',
             connect_in='True to connect dlatch and dff inputs. Defaults to True',
             vertical_sup='True to have supply unconnected on conn_layer.',
+            clk_on_right="True to place clock buffer on right, else left. Defaults to False",
         )
 
     @classmethod
@@ -103,6 +104,7 @@ class Demux1To2(MOSBase):
             sig_locs={},
             connect_in=True,
             vertical_sup=False,
+            clk_on_right=False
         )
 
     def draw_layout(self) -> None:
@@ -120,6 +122,7 @@ class Demux1To2(MOSBase):
         connect_in: bool = self.params['connect_in']
         use_ff: bool = self.params['use_ff']
         vertical_sup: bool = self.params['vertical_sup']
+        clk_on_right: bool = self.params['clk_on_right']
 
         has_in_buf = in_buf_params is not None
         has_clk_buf = clk_buf_params is not None
@@ -127,6 +130,7 @@ class Demux1To2(MOSBase):
         hm_layer = self.conn_layer + 1
         vm_layer = hm_layer + 1
 
+        # --- Create instances --- #
         shared_params = dict(pinfo=pinfo, ridx_p=ridx_p, ridx_n=ridx_n, vertical_sup=vertical_sup)
 
         dff_params = dlatch_params.copy(append=dict(**shared_params, seg_ck=0))
@@ -156,6 +160,7 @@ class Demux1To2(MOSBase):
         else:
             clk_buf_master = None
 
+        # --- Place instances --- #
         cur_col = 0
         if has_in_buf:
             in_buf_inst = self.add_tile(in_buf_master, 0, cur_col)
@@ -163,37 +168,42 @@ class Demux1To2(MOSBase):
         else:
             in_buf_inst = None
 
-        if has_clk_buf:
+        if has_clk_buf and not clk_on_right:
             if clk_buf_master.num_stages > 1:
                 coord_delta = self.tr_manager.get_sep(vm_layer, ('sig', 'sig')) * self.grid.get_track_pitch(vm_layer)
                 cur_col += (coord_delta / self.sd_pitch).up_even(True).value
             clk_buf_inst = self.add_tile(clk_buf_master, 0, cur_col)
             cur_col += clk_buf_master.num_cols + self.min_sep_col
-        else:
-            clk_buf_inst = None
 
         dlatch_inst = self.add_tile(dlatch_master, 0, cur_col)
         cur_col += dlatch_master.num_cols + self.min_sep_col
         dff_inst = self.add_tile(dff_master, 0, cur_col)
         cur_col += dff_master.num_cols + self.min_sep_col
-        all_insts = [in_buf_inst, clk_buf_inst, dlatch_inst, dff_inst]
 
-        self.connect_wires([dlatch_inst.get_pin('nclkb'), dff_inst.get_pin('nclkb')])
-        self.connect_to_track_wires(dlatch_inst.get_pin('pclk'), dff_inst.get_pin('clk'))
+        if has_clk_buf and clk_on_right:
+            if clk_buf_master.num_stages > 1:
+                coord_delta = self.tr_manager.get_sep(vm_layer, ('sig', 'sig')) * self.grid.get_track_pitch(vm_layer)
+                cur_col += (coord_delta / self.sd_pitch).up_even(True).value
+            clk_buf_inst = self.add_tile(clk_buf_master, 0, cur_col + clk_buf_master.num_cols, flip_lr=True)
+            cur_col += clk_buf_master.num_cols + self.min_sep_col
+        
+        if not has_clk_buf:
+            clk_buf_inst = None
+
+        all_insts = [in_buf_inst, clk_buf_inst, dlatch_inst, dff_inst]
 
         if use_ff:
             out_inst_early = dff_inst
             in_inst_early = dlatch_inst
             in_inst_late = out_inst_late = self.add_tile(dff_master, 0, cur_col)
             all_insts.append(out_inst_late)
-            self.connect_wires([dff_inst.get_pin('nclkb_s'), out_inst_late.get_pin('nclkb')])
-            self.connect_wires([dff_inst.get_pin('pclk_s'), out_inst_late.get_pin('pclk')])
-            self.connect_to_track_wires(dlatch_inst.get_pin('out'), dff_inst.get_pin('nin'))
         else:
             in_inst_early = out_inst_early = dff_inst
             in_inst_late = out_inst_late = dlatch_inst
         self.set_mos_size()
 
+        # --- Routing --- #
+        # Supplies
         if vertical_sup:
             # Conn layer
             vdd_conn, vss_conn = [], []
@@ -213,29 +223,57 @@ class Demux1To2(MOSBase):
         self.add_pin('VDD', vdd_hm)
         self.add_pin('VSS', vss_hm)
 
-        if has_in_buf:
-            self.reexport(in_buf_inst.get_port('in'))
-
+        # Clock signals
         if has_clk_buf:
-            if clk_buf_master.num_stages == 1:
-                self.connect_wires([clk_buf_inst.get_pin('in'), dlatch_inst.get_pin('nclk')])
-                self.reexport(dlatch_inst.get_port('clk'))
+            if not clk_on_right:
+                if clk_buf_master.num_stages == 1:
+                    self.connect_wires([clk_buf_inst.get_pin('in'), dlatch_inst.get_pin('nclk')])
+                    self.reexport(dlatch_inst.get_port('clk'))
+                else:
+                    self.connect_to_track_wires(dlatch_inst.get_pin('nclk'), clk_buf_inst.get_pin('out'))
+                    self.reexport(dlatch_inst.get_port('clk'), net_name='clk_buf', hide=not export_nets)
+                    vm_tid = TrackID(vm_layer, self.grid.coord_to_track(vm_layer, clk_buf_inst.bound_box.xl,
+                                                                        RoundMode.GREATER))
+                    vm_tid = self.tr_manager.get_next_track_obj(vm_tid, 'sig', 'sig', -1)
+                    self.add_pin('clk', self.connect_to_tracks(clk_buf_inst.get_pin('in'), vm_tid,
+                                                            min_len_mode=MinLenMode.MIDDLE))
+                self.connect_to_track_wires(dlatch_inst.get_pin('nclkb'), clk_buf_inst.get_pin('outb'))
+                self.reexport(dlatch_inst.get_port('clkb'), net_name='clkb_buf', hide=not export_nets)
             else:
-                self.connect_to_track_wires(dlatch_inst.get_pin('nclk'), clk_buf_inst.get_pin('out'))
-                self.reexport(dlatch_inst.get_port('clk'), net_name='clk_buf', hide=not export_nets)
-                vm_tid = TrackID(vm_layer, self.grid.coord_to_track(vm_layer, clk_buf_inst.bound_box.xl,
-                                                                    RoundMode.GREATER))
-                vm_tid = self.tr_manager.get_next_track_obj(vm_tid, 'sig', 'sig', -1)
-                self.add_pin('clk', self.connect_to_tracks(clk_buf_inst.get_pin('in'), vm_tid,
-                                                           min_len_mode=MinLenMode.MIDDLE))
-            self.connect_to_track_wires(dlatch_inst.get_pin('nclkb'), clk_buf_inst.get_pin('outb'))
-            self.reexport(dlatch_inst.get_port('clkb'), net_name='clkb_buf', hide=not export_nets)
+                if clk_buf_master.num_stages == 1:
+                    self.connect_wires([clk_buf_inst.get_pin('in'), dff_inst.get_pin('pclk')])
+                    self.reexport(dlatch_inst.get_port('clk'))
+                else:
+                    self.connect_to_track_wires(dff_inst.get_pin('pclk_s'), clk_buf_inst.get_pin('out'))
+                    self.reexport(dff_inst.get_port('clk'), net_name='clk_buf', hide=not export_nets)
+                    vm_tid = TrackID(vm_layer, self.grid.coord_to_track(vm_layer, clk_buf_inst.bound_box.xh,
+                                                                        RoundMode.LESS))
+                    vm_tid = self.tr_manager.get_next_track_obj(vm_tid, 'sig', 'sig', 1)
+                    self.add_pin('clk', self.connect_to_tracks(clk_buf_inst.get_pin('in'), vm_tid,
+                                                            min_len_mode=MinLenMode.MIDDLE))
+                self.connect_to_track_wires(dff_inst.get_pin('nclkb_s'), clk_buf_inst.get_pin('outb'))
+                self.reexport(dff_inst.get_port('clkb'), net_name='clkb_buf', hide=not export_nets)
         else:
             self.reexport(dlatch_inst.get_port('clkb'))
             self.reexport(dlatch_inst.get_port('clk'))
 
+        # Share clock routes
+        self.connect_wires([dlatch_inst.get_pin('nclkb'), dff_inst.get_pin('nclkb')])
+        self.connect_to_track_wires(dlatch_inst.get_pin('pclk'), dff_inst.get_pin('clk'))
+
+        if use_ff:
+            self.connect_wires([dff_inst.get_pin('nclkb_s'), out_inst_late.get_pin('nclkb')])
+            self.connect_wires([dff_inst.get_pin('pclk_s'), out_inst_late.get_pin('pclk')])
+            # FF buffer route
+            self.connect_to_track_wires(dlatch_inst.get_pin('out'), dff_inst.get_pin('nin'))
+
+        # Outputs
         self.reexport(out_inst_late.get_port('out'), net_name=f'out<{int(not is_big_endian)}>')
         self.reexport(out_inst_early.get_port('out'), net_name=f'out<{int(is_big_endian)}>')
+
+        # Inputs
+        if has_in_buf:
+            self.reexport(in_buf_inst.get_port('in'))
 
         if connect_in:
             in_warrs = [warr for inst in (dlatch_inst, dff_inst) for warr in inst.get_all_port_pins('in')]
@@ -422,6 +460,7 @@ class DesBinaryTree(MOSBase):
         else:
             assert clk_layer >= xm_layer
 
+        # --- Create Templates --- #
         logic_pinfo = self.get_tile_pinfo(logic_tidx)
         shared_params = dict(pinfo=logic_pinfo, ridx_p=ridx_p, ridx_n=ridx_n, vertical_sup=has_substrate_rows,
                              draw_taps=False)
@@ -441,6 +480,7 @@ class DesBinaryTree(MOSBase):
         else:
             din_buf_master = None
 
+        # --- Place instances --- #
         num_units = ratio - 1
         demux_insts = []
         cur_col = 0
@@ -508,6 +548,7 @@ class DesBinaryTree(MOSBase):
 
         self.set_mos_size()
 
+        # --- Routing --- #
         wlookup_map = self.get_tile_pinfo(logic_tidx).wire_lookup
 
         # if multiple horizontal layers are used for signal routing, the xm_layer TrackID that is reserved for
@@ -691,6 +732,7 @@ class DesArrayBinaryTree(MOSBase):
             logic_tidx='Tile index. Defaults to 0',
             ptap_tidx='ptap tile index. If None, assume no substrate rows are used. Defaults to None',
             ntap_tidx='ntap tile index. If None, assume no substrate rows are used. Defaults to None',
+            sup_layer="Supply layer. Defaults to xxm_layer = hm_layer + 4",
         )
 
     @classmethod
@@ -711,6 +753,7 @@ class DesArrayBinaryTree(MOSBase):
             logic_tidx=0,
             ptap_tidx=None,
             ntap_tidx=None,
+            sup_layer=0,
         )
 
     @classmethod
@@ -726,7 +769,8 @@ class DesArrayBinaryTree(MOSBase):
             assert ptap_tile_name is None
             return pinfo, [logic_tile_name], False
 
-        has_substrate_taps = ntap_tile_name is not None
+        # has_substrate_taps = ntap_tile_name is not None
+        has_substrate_taps = False  # BZ 9/29 TODO: substrate taps currently does not work
 
         if isinstance(pinfo, ImmutableSortedDict):
             pinfo_dict = pinfo.to_dict()
@@ -758,7 +802,6 @@ class DesArrayBinaryTree(MOSBase):
             assert isinstance(pinfo, tuple) and isinstance(pinfo[0], (TilePattern, TilePatternElement))
             tp = pinfo[0] if isinstance(pinfo[0], TilePattern) else pinfo[0]._info
             tile_order = [tpe.name for tpe in tp._pat_list]
-        # breakpoint()
         return pinfo, tile_order, has_substrate_taps
 
     @property
@@ -767,7 +810,7 @@ class DesArrayBinaryTree(MOSBase):
 
     def _add_unit_insts(self, num: int, cur_tidx: int, unit_params: Mapping, unit_insts: list, 
                         unit_masters: list, unit_pinfo_list: list, has_substrate_rows: bool, 
-                        tile_order: list):
+                        tile_order: list, col_idx: int = 0):
         """Helper function to draw 'num' SenseAmp units start at tile_idx = cur_tidx.
         unit_masters, unit_insts, and unit_pinfos are used to return the respective items. 
         Returns the next available tile index (i.e. last used tile index + 1)
@@ -785,26 +828,18 @@ class DesArrayBinaryTree(MOSBase):
                     ptap_tidx=sub_tile_order.index('ptap'),
                     ntap_tidx=sub_tile_order.index('ntap')
                 ))
-            # print(tidx_dict)
-            # breakpoint()
             try:
                 cache_idx = unit_pinfo_list.index(unit_pinfo)
             except ValueError:
-                print(unit_pinfo)
-                print(sub_tile_order)
-                print(cur_tidx, cur_tidx + num_tiles)
-                print(tidx_dict)
                 cur_params = unit_params.copy(append=dict(pinfo=unit_pinfo, **tidx_dict))
                 unit_master: DesBinaryTree = self.new_template(DesBinaryTree, params=cur_params)
                 unit_pinfo_list.append(unit_pinfo)
                 unit_masters.append(unit_master)
             else:
                 unit_master = unit_masters[cache_idx]
-            # print(cur_tidx)
-            inst = self.add_tile(unit_master, cur_tidx, 0)
+            inst = self.add_tile(unit_master, cur_tidx, col_idx)
             unit_insts.append(inst)
-            cur_tidx += num_tiles - 1
-        # breakpoint()
+            cur_tidx += num_tiles
         return cur_tidx
 
 
@@ -827,6 +862,9 @@ class DesArrayBinaryTree(MOSBase):
         logic_tidx: int = self.params['logic_tidx']
         ptap_tidx: Optional[int] = self.params['ptap_tidx']
         ntap_tidx: Optional[int] = self.params['ntap_tidx']
+        sup_layer: int = self.params['sup_layer']
+        
+        # --- Create pinfo --- #
 
         default_in_order = [(arr_idx, bit_idx) for arr_idx in range(narr) for bit_idx in range(in_width)]
         if in_order is None:
@@ -853,58 +891,53 @@ class DesArrayBinaryTree(MOSBase):
         pinfo = MOSBasePlaceInfo.make_place_info(self.grid, pinfo)
         self.draw_base(pinfo)
 
-        hm_layer = self.conn_layer + 1
+        # --- Create template parameters --- #
+
+        conn_layer = self.conn_layer
+        hm_layer = conn_layer + 1
         vm_layer = hm_layer + 1
         xm_layer = vm_layer + 1
 
         if clk_layer is None:
             clk_layer = xm_layer
+        if not sup_layer:
+            sup_layer = xm_layer + 2
 
-        # logic_pinfo = self.get_tile_pinfo(logic_tidx)
-        # shared_params = dict(pinfo=pinfo, ridx_p=ridx_p, ridx_n=ridx_n, logic_tidx=logic_tidx,
-        #                      ptap_tidx=ptap_tidx, ntap_tidx=ntap_tidx)
         shared_params = dict(pinfo=pinfo, draw_taps=False)
-
         clk_hor_layer = clk_layer if self.grid.is_horizontal(clk_layer) else clk_layer - 1
-
         unit_params = unit_params.copy(append=dict(**shared_params, clk_layer=clk_hor_layer))
-        # unit_master: DesBinaryTree = self.new_template(DesBinaryTree, params=unit_params)
-        # unit_num_rows = unit_master.num_tile_rows
-        # num_stages = unit_master.num_stages
+        dum_params = unit_params.copy(append=dict(clk_layer=None))
+        
         num_stages = unit_params['num_stages']
-        # breakpoint()
-        draw_taps = True
+        draw_taps = True  # TODO: is this redundant? Do we need an option without draw_taps?
         draw_substrate_rows = draw_taps and has_substrate_rows
+        draw_substrate_cols = draw_taps and not has_substrate_rows
 
-        if ndum:
-            dum_params = unit_params.copy(append=dict(clk_layer=None))
-            # dum_master: DesBinaryTree = self.new_template(DesBinaryTree, params=dum_params)
-        else:
-            dum_master = None
-
-        # assert isinstance(pinfo, tuple) and isinstance(pinfo[0], (TilePattern, TilePatternElement))
-        # tp = pinfo[0] if isinstance(pinfo[0], TilePattern) else pinfo[0]._info
-        # tile_order = [tpe.name for tpe in tp._pat_list]
+        # --- Place instances --- #
 
         unit_insts, unit_masters, unit_pinfo_list = [], [], []
         dum_insts, dum_masters, dum_pinfo_list = [], [], []
         tile_idx = 0
         dum_vss_vms = []
 
-        # has_substrate_rows = True  # TODO:
+        # Determine offset for tap columns
+        if draw_substrate_cols:
+            sup_col_info = self.get_supply_column_info(hm_layer, 0)
+            tap_ncols = sup_col_info.ncol
+            col_idx = tap_ncols
+        else:
+            col_idx = 0
 
+        # Add instances in each tile row
         unit_idx = 0
         for i in range(num_tot):
-        # for i, tile_idx in [0, 0], [1, 4]:
-        # for i, tile_idx in [0, 0], [1, 2]:
-        # for i, tile_idx in [0, 2], [1, 6]:
             if i in dum_unit_locs:
-                print(tile_idx)
-                # inst = self.add_tile(dum_master, tile_idx, 0)
                 tile_idx = self._add_unit_insts(1, tile_idx, dum_params, dum_insts, dum_masters, 
-                                                dum_pinfo_list, has_substrate_rows, tile_order)
-                # dum_insts.append(inst)
+                                                dum_pinfo_list, has_substrate_rows, tile_order,
+                                                col_idx)
                 inst = dum_insts[-1]
+
+                # Ties ports down
                 vss_vms = inst.get_all_port_pins('din_vm')
                 for stg_idx in range(num_stages):
                     vss_vms.extend(inst.get_all_port_pins(f'clk_div_{stg_idx}_vm'))
@@ -912,12 +945,12 @@ class DesArrayBinaryTree(MOSBase):
                 self.connect_to_track_wires(vss_vms, inst.get_pin('VSS'))
             else:
                 arr_idx, bit_idx = in_order[unit_idx]
-                # inst = self.add_tile(unit_master, tile_idx, 0)
-                # unit_insts.append(inst)
                 tile_idx = self._add_unit_insts(1, tile_idx, unit_params, unit_insts, unit_masters, 
-                                                unit_pinfo_list, has_substrate_rows, tile_order)
+                                                unit_pinfo_list, has_substrate_rows, tile_order,
+                                                col_idx)
                 inst = unit_insts[-1]
 
+                # Reexport ports
                 for port_name in inst.port_names_iter():
                     if port_name.startswith(('clk_div_', 'VDD', 'VSS')) and not port_name.startswith('clk_div_buf'):
                         continue
@@ -933,28 +966,39 @@ class DesArrayBinaryTree(MOSBase):
                         self.reexport(inst.get_port(port_name),
                                       net_name=f'{port_base}_{arr_idx}_{bit_idx}{port_sfx}')
                 unit_idx += 1
-            # # TODO: better handling
-            # if unit_num_rows == 1:
-            #     tile_idx += unit_num_rows
-            # else:
-            #     # substrate rows
-            #     tile_idx += unit_num_rows - 1
-        self.set_mos_size()
-
+        
+        # Draw taps and set mos size
         if draw_substrate_rows:
+            self.set_mos_size()
             for tile_idx, tile_name in enumerate(tile_order):
-                # if tile_name in (self.params['ptap_tile_name'], self.params['ntap_tile_name']):
                 if tile_name in ('ptap', 'ntap'):
                     self.add_substrate_contact(0, 0, tile_idx=tile_idx, seg=self.num_cols)
+        elif draw_substrate_cols:
+            unit_ncols = unit_masters[-1].num_cols
+            tot_ncols = unit_ncols + 2 * tap_ncols + self.sub_sep_col
+            vdd_table = {conn_layer: [], hm_layer: []}
+            vss_table = {conn_layer: [], hm_layer: []}
+            for i in range(num_tot):
+                self.add_supply_column(sup_col_info, 0, vdd_table, vss_table, tile_idx=i)
+                self.add_supply_column(sup_col_info, tot_ncols, vdd_table, 
+                                       vss_table, flip_lr=True, tile_idx=i)
+            self.set_mos_size(num_cols=tot_ncols)
+        else:
+            self.set_mos_size()
 
         all_insts = unit_insts + dum_insts
 
+        # --- Routing --- #
+
+        # Supplies
         vdd_hm = [inst.get_pin('VDD') for inst in all_insts]
         vss_hm = [inst.get_pin('VSS') for inst in all_insts]
         vdd_hm = self.connect_wires(vdd_hm, lower=self.bound_box.xl, upper=self.bound_box.xh)
         vss_hm = self.connect_wires(vss_hm, lower=self.bound_box.xl, upper=self.bound_box.xh)
-        # TODO:
-        sup_layer = hm_layer + 4
+        if draw_substrate_cols:
+            vdd_hm = self.connect_wires(vdd_hm + vdd_table[hm_layer])
+            vss_hm = self.connect_wires(vss_hm + vss_table[hm_layer])
+
         if sup_layer > hm_layer:
             vdd_hm_list = vdd_hm[0].to_warr_list()
             vss_hm_list = vss_hm[0].to_warr_list()
@@ -974,6 +1018,7 @@ class DesArrayBinaryTree(MOSBase):
                 self.reexport(inst.get_port('VDD'), connect=True)
                 self.reexport(inst.get_port('VSS'), connect=True)
 
+        # Clock routing
         is_hor_clk = self.grid.is_horizontal(clk_layer)
         w_clk = self.tr_manager.get_width(clk_layer, 'clk')
         clk_div_tidx_list = []
