@@ -107,6 +107,12 @@ class bag3_digital__flop_strongarm(Module):
         self.instances['XSA'].design(has_rstb=has_rstlb, **sa_params.copy(append=dict(export_mid=export_mid)))
         self.instances['XSR'].design(has_rstb=has_rstlb, **sr_params)
 
+        if 'osp' in self.instances['XSA'].master.pins:
+            self.add_pin('osp', 'input')
+            self.add_pin('osn', 'input')
+            self.reconnect_instance_terminal('XSA', 'osp', 'osp')
+            self.reconnect_instance_terminal('XSA', 'osn', 'osn')
+
         if not has_rstlb:
             self.remove_pin('rstlb')
 
